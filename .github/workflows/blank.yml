@@ -1,0 +1,137 @@
+import minerl
+import gym
+import numpy as np
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+import random
+from collections import deque
+
+# Configuración de Minecraft
+env = gym.make('MineRLNavigateDense-v0')  # O usar un entorno personalizado
+
+# Parámetros de entrenamiento
+state_size = env.observation_space['pov'].shape[0]  # Tamaño de las observaciones (tamaño de imagen)
+action_size = env.action_space.n  # Número de acciones posibles
+batch_size = 32
+n_episodes = 1000
+learning_rate = 0.001
+gamma = 0.99  # Factor de descuento
+epsilon = 1.0  # Probabilidad inicial de exploración
+epsilon_min = 0.01
+epsilon_decay = 0.995
+
+# Red neuronal para DQN (Modelo base)
+def build_model(state_size, action_size):
+    model = keras.Sequential([
+        layers.InputLayer(input_shape=(state_size,)),
+        layers.Dense(64, activation='relu'),
+        layers.Dense(64, activation='relu'),
+        layers.Dense(action_size, activation='linear')
+    ])
+    model.compile(optimizer=keras.optimizers.Adam(learning_rate), loss='mse')
+    return model
+
+# Red neuronal objetivo (Target Network) para DQN
+def build_target_model(state_size, action_size):
+    model = keras.Sequential([
+        layers.InputLayer(input_shape=(state_size,)),
+        layers.Dense(64, activation='relu'),
+        layers.Dense(64, activation='relu'),
+        layers.Dense(action_size, activation='linear')
+    ])
+    return model
+
+# Red neuronal convolucional para procesar imágenes (CNN)
+def build_cnn_dqn(state_size, action_size):
+    model = keras.Sequential([
+        layers.InputLayer(input_shape=(state_size, state_size, 3)),
+        layers.Conv2D(32, (3, 3), activation='relu'),
+        layers.MaxPooling2D((2, 2)),
+        layers.Conv2D(64, (3, 3), activation='relu'),
+        layers.MaxPooling2D((2, 2)),
+        layers.Flatten(),
+        layers.Dense(64, activation='relu'),
+        layers.Dense(action_size, activation='linear')  # Una salida para cada acción
+    ])
+    model.compile(optimizer=keras.optimizers.Adam(learning_rate), loss='mse')
+    return model
+
+# Función para seleccionar acciones usando epsilon-greedy
+def epsilon_greedy_policy(state, epsilon, model):
+    if np.random.rand() <= epsilon:
+        return random.randrange(action_size)  # Exploración
+    else:
+        return np.argmax(model.predict(state))  # Explotación
+
+# Entrenamiento con DQN y CNN
+def train_with_cnn():
+    model = build_cnn_dqn(state_size, action_size)
+    target_model = build_cnn_dqn(state_size, action_size)
+    target_model.set_weights(model.get_weights())  # Inicializamos la red objetivo
+
+    replay_buffer = deque(maxlen=2000)  # Buffer de repetición para almacenar experiencias
+    epsilon = 1.0
+    epsilon_min = 0.01
+    epsilon_decay = 0.995
+    gamma = 0.99
+    batch_size = 32
+
+    for episode in range(n_episodes):
+        state = env.reset()  # Obtener una imagen del estado inicial
+        state = np.reshape(state['pov'], (1, state_size, state_size, 3))  # Ajuste para imagen RGB
+        done = False
+        total_reward = 0
+
+        while not done:
+            action = epsilon_greedy_policy(state, epsilon, model)
+            next_state, reward, done, _ = env.step(action)
+            next_state = np.reshape(next_state['pov'], (1, state_size, state_size, 3))
+
+            replay_buffer.append((state, action, reward, next_state, done))
+
+            if len(replay_buffer) > batch_size:
+                minibatch = random.sample(replay_buffer, batch_size)
+                for s, a, r, ns, d in minibatch:
+                    target = r + (1 - d) * gamma * np.max(target_model.predict(ns))
+                    target_f = model.predict(s)
+                    target_f[0][a] = target
+
+                    model.fit(s, target_f, epochs=1, verbose=0)
+
+                if episode % 10 == 0:
+                    target_model.set_weights(model.get_weights())
+
+            state = next_state
+            total_reward += reward
+
+        # Decaimiento de epsilon
+        if epsilon > epsilon_min:
+            epsilon *= epsilon_decay
+
+        print(f"Episode {episode}/{n_episodes} - Total Reward: {total_reward}")
+
+    model.save("minecraft_dqn_cnn_model.h5")  # Guardar el modelo entrenado
+
+# Función de recompensas para la construcción procedural
+def build_wall(agent, env):
+    target_structure = np.ones((5, 5))  # Pared de 5x5 bloques
+    state = env.reset()  # Reseteamos el entorno
+    done = False
+    total_reward = 0
+    while not done:
+        action = agent.decide_action(state)  # Acción: el agente decide colocar un bloque
+        next_state, reward, done, _ = env.step(action)  # El agente coloca un bloque y recibe recompensa
+        if reward > 0:  # Si la acción es correcta
+            agent.learn(state, action, reward, next_state)  # El agente aprende
+        state = next_state
+        total_reward += reward
+    print(f"Construcción de pared completada con recompensa total: {total_reward}")
+
+# Entrenamiento principal
+def main():
+    train_with_cnn()  # Entrenamos el agente con DQN y CNN
+
+if __name__ == "__main__":
+    main()
+
